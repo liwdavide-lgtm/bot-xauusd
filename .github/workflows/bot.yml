@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"
 
       - name: Installa le dipendenze
-        run: pip install requests
+        run: pip install requests tzdata
 
       - name: Esegui il bot
         env:
