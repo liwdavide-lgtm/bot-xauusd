@@ -26,10 +26,10 @@ from datetime import datetime
 # CONFIGURAZIONE — letta dalle variabili d'ambiente (GitHub Secrets)
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-GOLDAPI_KEY = os.environ.get("GOLDAPI_KEY", "")
-MARKETAUX_KEY = os.environ.get("MARKETAUX_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("8976583344:AAGCuSwjAM-u3w6YCmRYjYXKS-RF8nVWlgM", "")
+TELEGRAM_CHAT_ID = os.environ.get("7786972300", "")
+GOLDAPI_KEY = os.environ.get("goldapi-7e3488a61dd35632cb484fac3236f5cd-io", "")
+MARKETAUX_KEY = os.environ.get("rF9iVXxPdYj3ze985FzRRL3I7vhTHq9TkTzBbBAF", "")
 
 # Ogni quanti minuti controllare il prezzo (le notizie si controllano ad ogni esecuzione:
 # è la schedule del workflow su GitHub a decidere ogni quanto gira lo script)
