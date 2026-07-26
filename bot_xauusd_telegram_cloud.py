@@ -31,6 +31,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GOLDAPI_KEY = os.environ.get("GOLDAPI_KEY", "")
 MARKETAUX_KEY = os.environ.get("MARKETAUX_KEY", "")
 
+# Opzionali: se non impostati, il bot funziona lo stesso ma salta il sentiment retail
+MYFXBOOK_EMAIL = os.environ.get("MYFXBOOK_EMAIL", "")
+MYFXBOOK_PASSWORD = os.environ.get("MYFXBOOK_PASSWORD", "")
+
 # Ogni quanti minuti controllare il prezzo (le notizie si controllano ad ogni esecuzione:
 # è la schedule del workflow su GitHub a decidere ogni quanto gira lo script)
 INTERVALLO_PREZZO_MIN = 120
@@ -137,6 +141,101 @@ def controlla_e_invia_prezzo():
             log("Prezzo inviato su Telegram")
     else:
         log(f"Risposta inattesa da GoldAPI: {dati}")
+
+
+# ---------- SENTIMENT TRADER RETAIL (Myfxbook, opzionale) ----------
+
+def ottieni_sentiment_retail():
+    """
+    Percentuale di trader retail long/short su XAUUSD secondo Myfxbook.
+    Richiede login (email+password) perché l'API di Myfxbook funziona così,
+    non con una API key. Fa login, legge i dati, poi fa sempre logout.
+    Ritorna un dict con i dati del simbolo XAUUSD, o None se qualcosa va storto.
+    """
+    try:
+        login = requests.get(
+            "https://www.myfxbook.com/api/login.json",
+            params={"email": MYFXBOOK_EMAIL, "password": MYFXBOOK_PASSWORD},
+            timeout=15,
+        )
+        login.raise_for_status()
+        login_data = login.json()
+        if login_data.get("error"):
+            log(f"Errore login Myfxbook: {login_data.get('message')}")
+            return None
+
+        session = login_data["session"]
+
+        try:
+            outlook = requests.get(
+                "https://www.myfxbook.com/api/get-community-outlook.json",
+                params={"session": session},
+                timeout=15,
+            )
+            outlook.raise_for_status()
+            outlook_data = outlook.json()
+        finally:
+            # chiude sempre la sessione, anche se sopra è andato storto qualcosa
+            requests.get(
+                "https://www.myfxbook.com/api/logout.json",
+                params={"session": session},
+                timeout=15,
+            )
+
+        if outlook_data.get("error"):
+            log(f"Errore community-outlook Myfxbook: {outlook_data.get('message')}")
+            return None
+
+        for simbolo in outlook_data.get("symbols", []):
+            if (simbolo.get("name") or "").upper() == "XAUUSD":
+                return simbolo
+
+        log("XAUUSD non trovato nei dati Myfxbook (nome simbolo diverso da quello atteso?)")
+        return None
+
+    except requests.RequestException as e:
+        log(f"Errore nel recupero sentiment retail: {e}")
+        return None
+
+
+def formatta_messaggio_sentiment_retail(dati):
+    long_pct = dati.get("longPercentage")
+    short_pct = dati.get("shortPercentage")
+    if long_pct is None or short_pct is None:
+        return None
+
+    # Lettura "contrarian": molti trader dalla stessa parte è visto tradizionalmente
+    # come un indizio (non una certezza) che il mercato possa muoversi nell'altra
+    # direzione, perché il retail tende a stare dalla parte sbagliata nei grandi
+    # movimenti. Soglia 60% presa dalla prassi comune di questo tipo di indicatori.
+    if long_pct >= 60:
+        lettura = "⚠️ Molti trader long — lettura contrarian: possibile pressione ribassista"
+    elif short_pct >= 60:
+        lettura = "⚠️ Molti trader short — lettura contrarian: possibile pressione rialzista"
+    else:
+        lettura = "Posizionamento abbastanza equilibrato"
+
+    testo = (
+        f"👥 <b>XAU/USD — Sentiment trader retail</b>\n\n"
+        f"🟢 Long: {long_pct:.0f}%\n"
+        f"🔴 Short: {short_pct:.0f}%\n"
+        f"{lettura}\n\n"
+        f"⚠️ Dati aggregati dai trader Myfxbook: non prevedono il prezzo, "
+        f"vanno letti come un indizio in più insieme al resto."
+    )
+    return testo
+
+
+def controlla_e_invia_sentiment_retail():
+    if not MYFXBOOK_EMAIL or not MYFXBOOK_PASSWORD:
+        log("MYFXBOOK_EMAIL/MYFXBOOK_PASSWORD non configurati: salto il sentiment retail")
+        return
+    log("Controllo sentiment trader retail...")
+    dati = ottieni_sentiment_retail()
+    if dati:
+        messaggio = formatta_messaggio_sentiment_retail(dati)
+        if messaggio and invia_messaggio_telegram(messaggio):
+            log("Sentiment retail inviato su Telegram")
 
 
 # ---------- NOTIZIE ----------
@@ -293,6 +392,7 @@ def main():
     minuti_da_ultimo_prezzo = (time.time() - stato.get("ultimo_controllo_prezzo", 0)) / 60
     if minuti_da_ultimo_prezzo >= INTERVALLO_PREZZO_MIN:
         controlla_e_invia_prezzo()
+        controlla_e_invia_sentiment_retail()
         stato["ultimo_controllo_prezzo"] = time.time()
     else:
         log(f"Prezzo controllato {minuti_da_ultimo_prezzo:.0f} min fa: non ancora ora (ogni {INTERVALLO_PREZZO_MIN} min)")
