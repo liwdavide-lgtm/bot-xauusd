@@ -1,18 +1,12 @@
-"""
-Bot Telegram per XAU/USD — versione per GitHub Actions
+""
+Bot Telegram per aggiornamenti su XAU/USD (Oro/Dollaro)
 =========================================================
-Stessa logica della versione locale, adattata per girare come workflow
-programmato su GitHub invece che come processo continuo sul PC.
+Cosa fa:
+  - Controlla periodicamente il prezzo di XAU/USD e lo invia su Telegram
+  - Controlla periodicamente le notizie sul mercato dell'oro e invia quelle nuove
 
-Differenze rispetto alla versione locale:
-  - Le chiavi si leggono dalle variabili d'ambiente (GitHub Secrets),
-    NON sono scritte nel file. Così il repository può restare pubblico
-    (minuti Actions illimitati) senza esporre nulla.
-  - Esegue UN controllo e poi esce, invece del ciclo infinito: è il
-    programma di GitHub Actions a rilanciarlo ad intervalli regolari.
-  - Lo stato (notizie già inviate, orario ultimo controllo prezzo) è
-    salvato in stato_bot.json, che il workflow ricommitta nel repository
-    ad ogni esecuzione, così sopravvive da un'esecuzione all'altra.
+PRIMA DI AVVIARE: compila la sezione CONFIGURAZIONE qui sotto con le tue chiavi.
+Vedi le istruzioni per ottenerle nella chat dove hai ricevuto questo file.
 """
 
 import requests
@@ -23,22 +17,38 @@ import html
 from datetime import datetime
 
 # ============================================================
-# CONFIGURAZIONE — letta dalle variabili d'ambiente (GitHub Secrets)
+# CONFIGURAZIONE — inserisci qui le tue chiavi
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-GOLDAPI_KEY = os.environ.get("GOLDAPI_KEY", "")
-MARKETAUX_KEY = os.environ.get("MARKETAUX_KEY", "")
+TELEGRAM_BOT_TOKEN = "INSERISCI_IL_TUO_TOKEN_BOTFATHER"
+TELEGRAM_CHAT_ID = "INSERISCI_IL_TUO_CHAT_ID"
 
-# Ogni quanti minuti controllare il prezzo (le notizie si controllano ad ogni esecuzione:
-# è la schedule del workflow su GitHub a decidere ogni quanto gira lo script)
+GOLDAPI_KEY = "INSERISCI_LA_TUA_CHIAVE_GOLDAPI"        # da https://www.goldapi.io
+MARKETAUX_KEY = "INSERISCI_LA_TUA_CHIAVE_MARKETAUX"    # da https://www.marketaux.com
+
+# Ogni quanti minuti controllare il prezzo e inviarlo
+# 120 min = 12 volte/giorno = ~360 richieste/mese (piano free GoldAPI ~500/mese)
 INTERVALLO_PREZZO_MIN = 120
 
-LINGUA_NOTIZIE = "en"
-MAX_NOTIZIE_PER_CONTROLLO = 5
+# Ogni quanti minuti controllare le notizie
+# 30 min = 48 volte/giorno (piano free Marketaux: 100 richieste/giorno)
+INTERVALLO_NOTIZIE_MIN = 30
 
-FILE_STATO = "stato_bot.json"
+# Lingua delle notizie: "en" (inglese, più risultati), "it" (italiano), oppure "it,en"
+LINGUA_NOTIZIE = "en"
+
+# Quante notizie candidate analizzare ad ogni controllo (non consuma più richieste
+# API: è sempre 1 sola chiamata, cambia solo quante ne restituisce)
+NOTIZIE_DA_ANALIZZARE = 10
+
+# Tra le candidate NUOVE, quante tra le più rilevanti inviare: le altre si scartano.
+# Il "relevance_score" di Marketaux è relativo a questa ricerca, non una scala fissa:
+# si prendono sempre "i migliori N trovati". Il punteggio compare in ogni messaggio,
+# quindi osservando i valori reali nei primi giorni si può alzare/abbassare questo
+# numero se sembra troppo permissivo o troppo severo.
+NOTIZIE_IMPORTANTI_DA_INVIARE = 3
+
+FILE_NOTIZIE_INVIATE = "notizie_inviate.json"
 
 # ============================================================
 # FUNZIONI DI SUPPORTO
@@ -128,6 +138,23 @@ def controlla_e_invia_prezzo():
 
 # ---------- NOTIZIE ----------
 
+def carica_notizie_inviate():
+    if os.path.exists(FILE_NOTIZIE_INVIATE):
+        try:
+            with open(FILE_NOTIZIE_INVIATE, "r") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, IOError):
+            return set()
+    return set()
+
+
+def salva_notizie_inviate(uuids):
+    # tiene solo le ultime 300 per non far crescere il file all'infinito
+    uuids_lista = list(uuids)[-300:]
+    with open(FILE_NOTIZIE_INVIATE, "w") as f:
+        json.dump(uuids_lista, f)
+
+
 def ottieni_notizie_oro():
     """Recupera notizie recenti su oro/XAUUSD da Marketaux"""
     url = "https://api.marketaux.com/v1/news/all"
@@ -135,8 +162,8 @@ def ottieni_notizie_oro():
         "api_token": MARKETAUX_KEY,
         "search": 'gold|XAUUSD|"gold price"',
         "language": LINGUA_NOTIZIE,
-        "limit": MAX_NOTIZIE_PER_CONTROLLO,
-        "sort": "published_at",
+        "limit": NOTIZIE_DA_ANALIZZARE,
+        "sort": "relevance_score",
     }
     try:
         r = requests.get(url, params=params, timeout=15)
@@ -155,8 +182,8 @@ def calcola_sentiment_notizia(articolo):
     """
     Marketaux restituisce il sentiment per ogni 'entità' identificata nell'articolo
     (es. XAU, TSLA...), non un punteggio unico per l'articolo intero.
-    Cerchiamo prima un'entità che sembra essere l'oro; se non c'è, facciamo la
-    media di tutte le entità trovate; se non c'è nessuna entità, non mostriamo nulla.
+    Qui cerchiamo prima un'entità che sembra essere l'oro; se non c'è, facciamo
+    la media di tutte le entità trovate; se non c'è nessuna entità, non mostriamo nulla.
     Ritorna: (punteggio da -1 a +1 oppure None, "oro" oppure "generale")
     """
     entities = articolo.get("entities", [])
@@ -182,10 +209,15 @@ def formatta_messaggio_notizia(articolo):
     link = articolo.get("url", "")
     pubblicato = articolo.get("published_at", "")[:16].replace("T", " ")
 
+    rilevanza = articolo.get("relevance_score")
+
     testo = (
         f"📰 <b>{titolo}</b>\n"
         f"🏷️ Fonte: {fonte}\n"
     )
+
+    if rilevanza is not None:
+        testo += f"⭐ Rilevanza: {rilevanza:.1f}\n"
 
     punteggio, tipo = calcola_sentiment_notizia(articolo)
     if punteggio is not None:
@@ -205,9 +237,9 @@ def formatta_messaggio_notizia(articolo):
     return testo
 
 
-def controlla_e_invia_notizie(stato):
+def controlla_e_invia_notizie():
     log("Controllo notizie oro...")
-    notizie_inviate = set(stato.get("notizie_inviate", []))
+    notizie_inviate = carica_notizie_inviate()
     articoli = ottieni_notizie_oro()
 
     nuove = [a for a in articoli if a.get("uuid") not in notizie_inviate]
@@ -216,64 +248,54 @@ def controlla_e_invia_notizie(stato):
         log("Nessuna notizia nuova.")
         return
 
-    for articolo in reversed(nuove):  # invia dalla più vecchia alla più recente
+    # tiene solo le più rilevanti tra le nuove, scarta il resto
+    nuove.sort(key=lambda a: a.get("relevance_score") or 0, reverse=True)
+    importanti = nuove[:NOTIZIE_IMPORTANTI_DA_INVIARE]
+    scartate = len(nuove) - len(importanti)
+    if scartate > 0:
+        log(f"{scartate} notizie nuove scartate (rilevanza troppo bassa)")
+
+    for articolo in importanti:  # dalla più rilevante alla meno rilevante
         messaggio = formatta_messaggio_notizia(articolo)
         if invia_messaggio_telegram(messaggio):
             notizie_inviate.add(articolo.get("uuid"))
-            log(f"Notizia inviata: {articolo.get('title', '')[:60]}")
-            time.sleep(2)
+            log(f"Notizia inviata (rilevanza {articolo.get('relevance_score') or 0:.1f}): {articolo.get('title', '')[:60]}")
+            time.sleep(2)  # piccola pausa tra un messaggio e l'altro
 
-    # tiene solo le ultime 300 per non far crescere il file all'infinito
-    stato["notizie_inviate"] = list(notizie_inviate)[-300:]
-
-
-# ---------- STATO (persistito nel repository tra un'esecuzione e l'altra) ----------
-
-def carica_stato():
-    if os.path.exists(FILE_STATO):
-        try:
-            with open(FILE_STATO, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"notizie_inviate": [], "ultimo_controllo_prezzo": 0}
-
-
-def salva_stato(stato):
-    with open(FILE_STATO, "w") as f:
-        json.dump(stato, f)
+    salva_notizie_inviate(notizie_inviate)
 
 
 # ============================================================
-# ESECUZIONE SINGOLA (chiamata ad ogni run del workflow GitHub Actions)
+# LOOP PRINCIPALE
 # ============================================================
 
 def main():
-    log("Bot XAU/USD (GitHub Actions) — controllo singolo")
+    log("Bot XAU/USD avviato")
+    log(f"Intervallo prezzo: ogni {INTERVALLO_PREZZO_MIN} minuti")
+    log(f"Intervallo notizie: ogni {INTERVALLO_NOTIZIE_MIN} minuti")
 
-    mancanti = [nome for nome, val in {
-        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
-        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
-        "GOLDAPI_KEY": GOLDAPI_KEY,
-        "MARKETAUX_KEY": MARKETAUX_KEY,
-    }.items() if not val]
-    if mancanti:
-        log(f"Secrets mancanti su GitHub (Settings > Secrets and variables > Actions): {', '.join(mancanti)}")
-        raise SystemExit(1)
+    if "INSERISCI" in TELEGRAM_BOT_TOKEN or "INSERISCI" in TELEGRAM_CHAT_ID:
+        log("ATTENZIONE: devi ancora configurare TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID in cima al file!")
+        return
 
-    stato = carica_stato()
+    # Primo controllo subito all'avvio
+    controlla_e_invia_prezzo()
+    controlla_e_invia_notizie()
+    ultimo_controllo_prezzo = time.time()
+    ultimo_controllo_notizie = time.time()
 
-    controlla_e_invia_notizie(stato)
+    while True:
+        ora_attuale = time.time()
 
-    minuti_da_ultimo_prezzo = (time.time() - stato.get("ultimo_controllo_prezzo", 0)) / 60
-    if minuti_da_ultimo_prezzo >= INTERVALLO_PREZZO_MIN:
-        controlla_e_invia_prezzo()
-        stato["ultimo_controllo_prezzo"] = time.time()
-    else:
-        log(f"Prezzo controllato {minuti_da_ultimo_prezzo:.0f} min fa: non ancora ora (ogni {INTERVALLO_PREZZO_MIN} min)")
+        if ora_attuale - ultimo_controllo_prezzo >= INTERVALLO_PREZZO_MIN * 60:
+            controlla_e_invia_prezzo()
+            ultimo_controllo_prezzo = ora_attuale
 
-    salva_stato(stato)
-    log("Controllo completato")
+        if ora_attuale - ultimo_controllo_notizie >= INTERVALLO_NOTIZIE_MIN * 60:
+            controlla_e_invia_notizie()
+            ultimo_controllo_notizie = ora_attuale
+
+        time.sleep(60)  # ricontrolla ogni minuto se è ora di agire
 
 
 if __name__ == "__main__":
