@@ -21,23 +21,15 @@ jobs:
 
       - name: Installa le dipendenze
         run: pip install requests
-      - name: Debug - lunghezza dei secrets
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOLDAPI_KEY: ${{ secrets.GOLDAPI_KEY }}
-          MARKETAUX_KEY: ${{ secrets.MARKETAUX_KEY }}
-        run: |
-          echo "Lunghezza TELEGRAM_BOT_TOKEN: ${#TELEGRAM_BOT_TOKEN}"
-          echo "Lunghezza TELEGRAM_CHAT_ID: ${#TELEGRAM_CHAT_ID}"
-          echo "Lunghezza GOLDAPI_KEY: ${#GOLDAPI_KEY}"
-          echo "Lunghezza MARKETAUX_KEY: ${#MARKETAUX_KEY}"
+
       - name: Esegui il bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOLDAPI_KEY: ${{ secrets.GOLDAPI_KEY }}
           MARKETAUX_KEY: ${{ secrets.MARKETAUX_KEY }}
+          MYFXBOOK_EMAIL: ${{ secrets.MYFXBOOK_EMAIL }}
+          MYFXBOOK_PASSWORD: ${{ secrets.MYFXBOOK_PASSWORD }}
         run: python bot_xauusd_telegram_cloud.py
 
       - name: Salva lo stato aggiornato nel repository
@@ -45,5 +37,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add stato_bot.json
-          git diff --staged --quiet || git commit -m "Aggiorna stato bot [skip ci]"
-          git push
+
+          if git diff --staged --quiet; then
+            echo "Nessuna modifica allo stato, niente da salvare."
+            exit 0
+          fi
+
+          git commit -m "Aggiorna stato bot [skip ci]"
+
+          for tentativo in 1 2 3 4 5; do
+            if git push; then
+              echo "Stato salvato con successo."
+              exit 0
+            fi
+            echo "Push rifiutato (probabile esecuzione sovrapposta), tentativo $tentativo/5: scarico gli aggiornamenti e riprovo..."
+            git pull --rebase origin main
+            sleep 3
+          done
+
+          echo "Attenzione: non sono riuscito a salvare lo stato dopo 5 tentativi."
+          echo "Il bot ha comunque svolto il suo lavoro in questa esecuzione (messaggi già inviati sopra)."
+          exit 0
