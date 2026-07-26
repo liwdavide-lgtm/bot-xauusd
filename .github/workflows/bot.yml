@@ -21,7 +21,17 @@ jobs:
 
       - name: Installa le dipendenze
         run: pip install requests
-
+      - name: Debug - lunghezza dei secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOLDAPI_KEY: ${{ secrets.GOLDAPI_KEY }}
+          MARKETAUX_KEY: ${{ secrets.MARKETAUX_KEY }}
+        run: |
+          echo "Lunghezza TELEGRAM_BOT_TOKEN: ${#TELEGRAM_BOT_TOKEN}"
+          echo "Lunghezza TELEGRAM_CHAT_ID: ${#TELEGRAM_CHAT_ID}"
+          echo "Lunghezza GOLDAPI_KEY: ${#GOLDAPI_KEY}"
+          echo "Lunghezza MARKETAUX_KEY: ${#MARKETAUX_KEY}"
       - name: Esegui il bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
